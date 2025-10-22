@@ -35,7 +35,11 @@ class ColumnMap:
 def _is_native(token_address):
     if token_address is None: return True
     s = str(token_address).strip().lower()
-    return s in {"", "n/a", "na", "none", "nan"}
+    # Check for empty, N/A, or non-hex strings
+    if s in {"", "n/a", "na", "none", "nan"}: return True
+    # Check if it's a valid hex address (starts with 0x and is 42 chars)
+    if not s.startswith("0x") or len(s) != 42: return True
+    return False
 
 def human_to_decimal(val):
     try:
@@ -109,23 +113,29 @@ with st.spinner("Fetching on-chain balances..."):
     for i, r in df.iterrows():
         progress_bar.progress((i + 1) / len(df))
         addr = str(r[cmap.address]).strip()
-        token = str(r[cmap.token_contract]).strip() if cmap.token_contract else None
+        token_raw = str(r[cmap.token_contract]).strip() if cmap.token_contract else None
         rep = human_to_decimal(r[cmap.reported_balance])
+        
+        # Validate wallet address
+        if not addr.startswith("0x") or len(addr) != 42:
+            res.append({"row": i+1, "wallet": addr,"token": token_raw or "AVAX","reported": rep,"onchain": None,"delta": None,"error": "Invalid wallet address format"})
+            continue
+            
         try:
-            if _is_native(token):
+            if _is_native(token_raw):
                 bal = fetch_native(RPC_URL, addr, blk) / 1e18
                 sym = "AVAX"
             else:
-                raw = fetch_erc20(RPC_URL, token, addr, blk)
+                raw = fetch_erc20(RPC_URL, token_raw, addr, blk)
                 if raw is None:
-                    res.append({"wallet": addr,"token": token,"reported": rep,"onchain": None,"delta": None,"error": "Failed to fetch balance"})
+                    res.append({"row": i+1, "wallet": addr,"token": token_raw,"reported": rep,"onchain": None,"delta": None,"error": "Failed to fetch balance"})
                     continue
-                decimals = fetch_token_decimals(RPC_URL, token)
+                decimals = fetch_token_decimals(RPC_URL, token_raw)
                 bal = raw / (10 ** decimals)
                 sym = r.get(cmap.token_symbol,"TOKEN") if cmap.token_symbol else "TOKEN"
-            res.append({"wallet": addr,"token": sym,"reported": rep,"onchain": bal,"delta": (bal-rep if rep is not None else None)})
+            res.append({"row": i+1, "wallet": addr,"token": sym,"reported": rep,"onchain": bal,"delta": (bal-rep if rep is not None else None)})
         except Exception as e:
-            res.append({"wallet": addr,"token": token if token else "AVAX","reported": rep,"onchain": None,"delta": None,"error": str(e)})
+            res.append({"row": i+1, "wallet": addr,"token": token_raw if token_raw else "AVAX","reported": rep,"onchain": None,"delta": None,"error": str(e)})
     progress_bar.empty()
 
 out = pd.DataFrame(res)
