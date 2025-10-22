@@ -10,13 +10,44 @@ from web3 import Web3
 from web3.exceptions import ContractLogicError
 
 # Setup
-st.set_page_config(page_title="Bitwave Balance Validator (Avalanche)", layout="wide")
-st.title("Bitwave Balance Validator — Token Balances vs On‑Chain (Avalanche)")
+st.set_page_config(page_title="Bitwave Balance Validator (Multi-Chain)", layout="wide")
+st.title("Bitwave Balance Validator — Multi-Chain Token Balance Validation")
 
-RPC_URL = os.getenv("AVALANCHE") or (st.secrets.get("rpc", {}).get("AVALANCHE") if hasattr(st, "secrets") else None)
-if not RPC_URL:
-    st.error("Missing RPC URL. Set via env or Streamlit secrets.")
+# Multi-chain RPC configuration
+CHAIN_CONFIG = {
+    "AVAX": {
+        "name": "Avalanche C-Chain",
+        "rpc": os.getenv("AVALANCHE") or (st.secrets.get("rpc", {}).get("AVALANCHE") if hasattr(st, "secrets") else None),
+        "native_token": "AVAX",
+        "aliases": ["avax", "avalanche", "avax-c", "avalanche c-chain", "avalanche c chain"]
+    },
+    "ETH": {
+        "name": "Ethereum Mainnet",
+        "rpc": os.getenv("ETHEREUM") or (st.secrets.get("rpc", {}).get("ETHEREUM") if hasattr(st, "secrets") else None),
+        "native_token": "ETH",
+        "aliases": ["eth", "ethereum", "ethereum mainnet", "mainnet"]
+    },
+    "ARB": {
+        "name": "Arbitrum One",
+        "rpc": os.getenv("ARBITRUM") or (st.secrets.get("rpc", {}).get("ARBITRUM") if hasattr(st, "secrets") else None),
+        "native_token": "ETH",
+        "aliases": ["arb", "arbitrum", "arbitrum one", "arb1"]
+    },
+    "BASE": {
+        "name": "Base",
+        "rpc": os.getenv("BASE") or (st.secrets.get("rpc", {}).get("BASE") if hasattr(st, "secrets") else None),
+        "native_token": "ETH",
+        "aliases": ["base", "base mainnet"]
+    }
+}
+
+# Check which chains are configured
+configured_chains = {k: v for k, v in CHAIN_CONFIG.items() if v["rpc"]}
+if not configured_chains:
+    st.error("⚠️ No RPC URLs configured. Please set environment variables or Streamlit secrets for: AVALANCHE, ETHEREUM, ARBITRUM, BASE")
     st.stop()
+
+st.success(f"✅ Configured chains: {', '.join([v['name'] for v in configured_chains.values()])}")
 
 ERC20_ABI = [
     {"constant": True, "inputs": [], "name": "decimals", "outputs": [{"name": "", "type": "uint8"}], "type": "function"},
@@ -57,11 +88,25 @@ def human_to_decimal(val):
 def make_w3(rpc):
     from web3.middleware import ExtraDataToPOAMiddleware
     w3 = Web3(Web3.HTTPProvider(rpc))
-    # Inject POA middleware to handle Avalanche's extra data in blocks
+    # Inject POA middleware to handle chains with extra data in blocks (Avalanche, etc.)
     w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
     return w3
 
-def fetch_native(rpc, addr, blk): return make_w3(rpc).eth.get_balance(Web3.to_checksum_address(addr), blk)
+def identify_chain(chain_value):
+    """Identify which chain based on the blockchain column value"""
+    if not chain_value or pd.isna(chain_value):
+        return None
+    
+    chain_str = str(chain_value).strip().lower()
+    
+    for chain_key, config in CHAIN_CONFIG.items():
+        if chain_str in config["aliases"]:
+            return chain_key
+    
+    return None
+
+def fetch_native(rpc, addr, blk): 
+    return make_w3(rpc).eth.get_balance(Web3.to_checksum_address(addr), blk)
 
 @st.cache_data(ttl=3600)
 def find_block_by_timestamp(rpc, target_ts):
@@ -194,7 +239,7 @@ def find_column(keywords):
                 return col
     return None
 
-# Auto-suggest columns with better matching
+# Auto-suggest columns with better matching (prioritize exact matches)
 suggested_mapping = {
     "address": find_column(["walletaddress", "wallet address", "wallet", "address"]),
     "chain": find_column(["blockchain", "chain", "network"]),
@@ -202,6 +247,10 @@ suggested_mapping = {
     "token_contract": find_column(["tokenaddress", "token address", "contractaddress", "contract address", "contract"]),
     "reported_balance": find_column(["value", "balance", "amount"])
 }
+
+# Validate that chain column exists for multi-chain support
+if not suggested_mapping["chain"]:
+    st.warning("⚠️ No 'blockchain' or 'chain' column detected. Multi-chain validation requires a chain identifier column.")
 
 # Show detected columns
 st.write("**Auto-detected columns:**")
@@ -262,57 +311,76 @@ mapping = {
 
 cmap = ColumnMap(**mapping)
 
-# Determine block number based on mode
-if validation_mode == "Current Balances":
-    blk = make_w3(RPC_URL).eth.block_number
-    st.info(f"✅ Validating **current balances** at block **{blk}**")
-else:
-    # Historical mode
-    local_dt = dt.datetime.combine(asof_date, asof_time)
-    utc_ts = int(pytz.timezone(tzname).localize(local_dt).astimezone(pytz.UTC).timestamp())
+# Group data by chain for processing
+if cmap.chain:
+    df['_chain_id'] = df[cmap.chain].apply(identify_chain)
+    chains_in_data = df['_chain_id'].dropna().unique()
+    st.write(f"**Chains detected in data:** {', '.join([CHAIN_CONFIG[c]['name'] for c in chains_in_data if c in CHAIN_CONFIG])}")
     
-    if explicit_blk:
-        blk = explicit_blk
-        st.info(f"✅ Validating **historical balances** at block **{blk}** (manually specified)")
-    else:
-        # Find block number by timestamp using binary search
-        with st.spinner("Finding block number for specified timestamp..."):
-            blk = find_block_by_timestamp(RPC_URL, utc_ts)
-        st.info(f"✅ Validating **historical balances** at block **{blk}** (timestamp: {utc_ts})")
+    # Check if all detected chains are configured
+    missing_chains = [c for c in chains_in_data if c not in configured_chains]
+    if missing_chains:
+        st.error(f"❌ Missing RPC configuration for: {', '.join([CHAIN_CONFIG.get(c, {}).get('name', c) for c in missing_chains])}")
+        st.stop()
+else:
+    st.warning("⚠️ No chain column mapped. Assuming all entries are for the first configured chain.")
+    df['_chain_id'] = list(configured_chains.keys())[0]
 
 res = []
 with st.spinner("Fetching on-chain balances..."):
     progress_bar = st.progress(0)
+    
     for i, r in df.iterrows():
         progress_bar.progress((i + 1) / len(df))
         addr = str(r[cmap.address]).strip()
         token_raw = str(r[cmap.token_contract]).strip() if cmap.token_contract else None
         rep = human_to_decimal(r[cmap.reported_balance])
+        chain_id = r.get('_chain_id')
+        
+        # Validate chain
+        if not chain_id or chain_id not in configured_chains:
+            res.append({"row": i+1, "chain": chain_id or "Unknown", "wallet": addr,"token": token_raw or "N/A","reported": rep,"onchain": None,"delta": None,"error": "Chain not configured or not recognized"})
+            continue
+        
+        chain_config = CHAIN_CONFIG[chain_id]
+        rpc_url = chain_config["rpc"]
+        native_token = chain_config["native_token"]
+        
+        # Get block number for this chain
+        if validation_mode == "Current Balances":
+            blk = make_w3(rpc_url).eth.block_number
+        else:
+            local_dt = dt.datetime.combine(asof_date, asof_time)
+            utc_ts = int(pytz.timezone(tzname).localize(local_dt).astimezone(pytz.UTC).timestamp())
+            if explicit_blk:
+                blk = explicit_blk
+            else:
+                blk = find_block_by_timestamp(rpc_url, utc_ts)
         
         # Validate wallet address (basic check)
         if not addr or len(addr) < 10:
-            res.append({"row": i+1, "wallet": addr,"token": token_raw or "AVAX","reported": rep,"onchain": None,"delta": None,"error": "Invalid or empty wallet address"})
+            res.append({"row": i+1, "chain": chain_config["name"], "wallet": addr,"token": token_raw or native_token,"reported": rep,"onchain": None,"delta": None,"error": "Invalid or empty wallet address"})
             continue
             
         try:
             if _is_native(token_raw):
                 try:
-                    bal = fetch_native(RPC_URL, addr, blk) / 1e18
-                    sym = "AVAX"
+                    bal = fetch_native(rpc_url, addr, blk) / 1e18
+                    sym = native_token
                 except Exception as e:
-                    res.append({"row": i+1, "wallet": addr,"token": "AVAX","reported": rep,"onchain": None,"delta": None,"error": f"Invalid address format: {str(e)}"})
+                    res.append({"row": i+1, "chain": chain_config["name"], "wallet": addr,"token": native_token,"reported": rep,"onchain": None,"delta": None,"error": f"Invalid address format: {str(e)}"})
                     continue
             else:
-                raw = fetch_erc20(RPC_URL, token_raw, addr, blk)
+                raw = fetch_erc20(rpc_url, token_raw, addr, blk)
                 if raw is None:
-                    res.append({"row": i+1, "wallet": addr,"token": token_raw,"reported": rep,"onchain": None,"delta": None,"error": "Failed to fetch balance"})
+                    res.append({"row": i+1, "chain": chain_config["name"], "wallet": addr,"token": token_raw,"reported": rep,"onchain": None,"delta": None,"error": "Failed to fetch balance"})
                     continue
-                decimals = fetch_token_decimals(RPC_URL, token_raw)
+                decimals = fetch_token_decimals(rpc_url, token_raw)
                 bal = raw / (10 ** decimals)
                 sym = r.get(cmap.token_symbol,"TOKEN") if cmap.token_symbol else "TOKEN"
-            res.append({"row": i+1, "wallet": addr,"token": sym,"reported": rep,"onchain": bal,"delta": (bal-rep if rep is not None else None)})
+            res.append({"row": i+1, "chain": chain_config["name"], "wallet": addr,"token": sym,"reported": rep,"onchain": bal,"delta": (bal-rep if rep is not None else None)})
         except Exception as e:
-            res.append({"row": i+1, "wallet": addr,"token": token_raw if token_raw else "AVAX","reported": rep,"onchain": None,"delta": None,"error": f"Error: {str(e)}"})
+            res.append({"row": i+1, "chain": chain_config["name"], "wallet": addr,"token": token_raw if token_raw else native_token,"reported": rep,"onchain": None,"delta": None,"error": f"Error: {str(e)}"})
     progress_bar.empty()
 
 out = pd.DataFrame(res)
