@@ -38,7 +38,13 @@ def _is_native(token_address):
     # Check for empty, N/A, or non-hex strings
     if s in {"", "n/a", "na", "none", "nan"}: return True
     # Check if it's a valid hex address (starts with 0x and is 42 chars)
-    if not s.startswith("0x") or len(s) != 42: return True
+    if not s.startswith("0x"): return True
+    if len(s) != 42: return True
+    # Check if it contains only valid hex characters after 0x
+    try:
+        int(s, 16)  # Will raise ValueError if not valid hex
+    except ValueError:
+        return True
     return False
 
 def human_to_decimal(val):
@@ -64,12 +70,12 @@ def fetch_token_decimals(rpc, token):
 
 def fetch_erc20(rpc, token, addr, blk):
     w3 = make_w3(rpc)
-    c = w3.eth.contract(address=Web3.to_checksum_address(token), abi=ERC20_ABI)
-    try: 
+    try:
+        c = w3.eth.contract(address=Web3.to_checksum_address(token), abi=ERC20_ABI)
         balance = c.functions.balanceOf(Web3.to_checksum_address(addr)).call(block_identifier=blk)
         return int(balance)
     except Exception as e: 
-        st.warning(f"Error fetching balance for {token}: {str(e)}")
+        # Return None on error, let caller handle the error message
         return None
 
 # --- Sidebar ---
