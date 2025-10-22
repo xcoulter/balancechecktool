@@ -41,6 +41,18 @@ CHAIN_CONFIG = {
     }
 }
 
+# Debug: Show what secrets are being loaded (mask the API key)
+if hasattr(st, "secrets"):
+    try:
+        avax_rpc = st.secrets.get("rpc", {}).get("AVALANCHE", "Not found in secrets")
+        if avax_rpc and avax_rpc != "Not found in secrets":
+            masked_rpc = avax_rpc[:50] + "..." + avax_rpc[-10:] if len(avax_rpc) > 60 else avax_rpc
+            st.info(f"🔍 Debug: AVALANCHE RPC loaded from secrets: `{masked_rpc}`")
+        else:
+            st.warning("⚠️ AVALANCHE not found in st.secrets['rpc']")
+    except Exception as e:
+        st.error(f"Error reading secrets: {e}")
+
 # Check which chains are configured
 configured_chains = {k: v for k, v in CHAIN_CONFIG.items() if v["rpc"]}
 if not configured_chains:
