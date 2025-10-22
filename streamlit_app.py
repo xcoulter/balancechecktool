@@ -87,10 +87,15 @@ def human_to_decimal(val):
 @st.cache_resource
 def make_w3(rpc):
     from web3.middleware import ExtraDataToPOAMiddleware
-    w3 = Web3(Web3.HTTPProvider(rpc))
-    # Inject POA middleware to handle chains with extra data in blocks (Avalanche, etc.)
-    w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-    return w3
+    try:
+        # Add timeout to prevent hanging
+        w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={'timeout': 30}))
+        # Inject POA middleware to handle chains with extra data in blocks (Avalanche, etc.)
+        w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+        return w3
+    except Exception as e:
+        st.error(f"Failed to connect to RPC: {rpc}. Error: {str(e)}")
+        raise
 
 def identify_chain(chain_value):
     """Identify which chain based on the blockchain column value"""
@@ -188,6 +193,23 @@ def fetch_erc20(rpc, token, addr, blk):
 
 # --- Sidebar ---
 st.sidebar.header("Balance Validation Settings")
+
+# Manual blockchain override
+use_manual_chain = st.sidebar.checkbox(
+    "Override blockchain detection",
+    help="Manually select a blockchain instead of using the blockchain column"
+)
+
+if use_manual_chain:
+    manual_chain = st.sidebar.selectbox(
+        "Select Blockchain",
+        options=list(configured_chains.keys()),
+        format_func=lambda x: CHAIN_CONFIG[x]["name"]
+    )
+else:
+    manual_chain = None
+
+st.sidebar.divider()
 
 # Choose between current or historical
 validation_mode = st.sidebar.radio(
@@ -312,7 +334,10 @@ mapping = {
 cmap = ColumnMap(**mapping)
 
 # Group data by chain for processing
-if cmap.chain:
+if use_manual_chain:
+    st.info(f"🔧 **Manual Override:** All entries will be validated on **{CHAIN_CONFIG[manual_chain]['name']}**")
+    df['_chain_id'] = manual_chain
+elif cmap.chain:
     df['_chain_id'] = df[cmap.chain].apply(identify_chain)
     chains_in_data = df['_chain_id'].dropna().unique()
     st.write(f"**Chains detected in data:** {', '.join([CHAIN_CONFIG[c]['name'] for c in chains_in_data if c in CHAIN_CONFIG])}")
@@ -346,16 +371,20 @@ with st.spinner("Fetching on-chain balances..."):
         rpc_url = chain_config["rpc"]
         native_token = chain_config["native_token"]
         
-        # Get block number for this chain
-        if validation_mode == "Current Balances":
-            blk = make_w3(rpc_url).eth.block_number
-        else:
-            local_dt = dt.datetime.combine(asof_date, asof_time)
-            utc_ts = int(pytz.timezone(tzname).localize(local_dt).astimezone(pytz.UTC).timestamp())
-            if explicit_blk:
-                blk = explicit_blk
+        # Get block number for this chain with error handling
+        try:
+            if validation_mode == "Current Balances":
+                blk = make_w3(rpc_url).eth.block_number
             else:
-                blk = find_block_by_timestamp(rpc_url, utc_ts)
+                local_dt = dt.datetime.combine(asof_date, asof_time)
+                utc_ts = int(pytz.timezone(tzname).localize(local_dt).astimezone(pytz.UTC).timestamp())
+                if explicit_blk:
+                    blk = explicit_blk
+                else:
+                    blk = find_block_by_timestamp(rpc_url, utc_ts)
+        except Exception as e:
+            res.append({"row": i+1, "chain": chain_config["name"], "wallet": addr,"token": token_raw or native_token,"reported": rep,"onchain": None,"delta": None,"error": f"RPC Error: {str(e)[:100]}"})
+            continue
         
         # Validate wallet address (basic check)
         if not addr or len(addr) < 10:
