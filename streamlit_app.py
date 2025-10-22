@@ -58,6 +58,37 @@ def make_w3(rpc): return Web3(Web3.HTTPProvider(rpc))
 
 def fetch_native(rpc, addr, blk): return make_w3(rpc).eth.get_balance(Web3.to_checksum_address(addr), blk)
 
+def find_block_by_timestamp(rpc, target_ts):
+    """Binary search to find block closest to target timestamp"""
+    w3 = make_w3(rpc)
+    latest_block = w3.eth.block_number
+    latest_ts = w3.eth.get_block(latest_block).timestamp
+    
+    # Check if target is in the future
+    if target_ts >= latest_ts:
+        return latest_block
+    
+    # Binary search
+    low, high = 0, latest_block
+    closest_block = latest_block
+    
+    while low <= high:
+        mid = (low + high) // 2
+        block = w3.eth.get_block(mid)
+        block_ts = block.timestamp
+        
+        if abs(block_ts - target_ts) < abs(w3.eth.get_block(closest_block).timestamp - target_ts):
+            closest_block = mid
+        
+        if block_ts < target_ts:
+            low = mid + 1
+        elif block_ts > target_ts:
+            high = mid - 1
+        else:
+            return mid
+    
+    return closest_block
+
 @st.cache_data
 def fetch_token_decimals(rpc, token):
     w3 = make_w3(rpc)
@@ -79,12 +110,29 @@ def fetch_erc20(rpc, token, addr, blk):
         return None
 
 # --- Sidebar ---
-col1, col2, col3 = st.sidebar.columns(3)
-with col1: asof_date = st.date_input("Date", dt.date.today())
-with col2: asof_time = st.time_input("Time", dt.time(23,59,59))
-with col3: tzname = st.selectbox("Timezone", pytz.all_timezones, index=pytz.all_timezones.index("UTC"))
-blk_input = st.sidebar.text_input("Block number (optional)")
-explicit_blk = int(blk_input) if blk_input.strip().isdigit() else None
+st.sidebar.header("Balance Validation Settings")
+
+# Choose between current or historical
+validation_mode = st.sidebar.radio(
+    "Validation Mode",
+    ["Current Balances", "Historical Balances"],
+    help="Current: Latest blockchain state. Historical: Balances at a specific date/time."
+)
+
+if validation_mode == "Historical Balances":
+    st.sidebar.subheader("Historical Date/Time")
+    col1, col2, col3 = st.sidebar.columns(3)
+    with col1: asof_date = st.date_input("Date", dt.date.today())
+    with col2: asof_time = st.time_input("Time", dt.time(23,59,59))
+    with col3: tzname = st.selectbox("Timezone", pytz.all_timezones, index=pytz.all_timezones.index("UTC"))
+    
+    blk_input = st.sidebar.text_input("Block number (optional)", help="Leave empty to auto-detect block from timestamp")
+    explicit_blk = int(blk_input) if blk_input.strip().isdigit() else None
+else:
+    asof_date = None
+    asof_time = None
+    tzname = None
+    explicit_blk = None
 
 # --- Upload ---
 upload = st.file_uploader("Upload Bitwave CSV/XLSX", type=["csv","xlsx"])
@@ -131,11 +179,23 @@ mapping = {
 
 cmap = ColumnMap(**mapping)
 
-local_dt = dt.datetime.combine(asof_date, asof_time)
-utc_ts = int(pytz.timezone(tzname).localize(local_dt).astimezone(pytz.UTC).timestamp())
-blk = explicit_blk or make_w3(RPC_URL).eth.block_number
-
-st.write(f"As-of {utc_ts} (UTC), block {blk}")
+# Determine block number based on mode
+if validation_mode == "Current Balances":
+    blk = make_w3(RPC_URL).eth.block_number
+    st.info(f"✅ Validating **current balances** at block **{blk}**")
+else:
+    # Historical mode
+    local_dt = dt.datetime.combine(asof_date, asof_time)
+    utc_ts = int(pytz.timezone(tzname).localize(local_dt).astimezone(pytz.UTC).timestamp())
+    
+    if explicit_blk:
+        blk = explicit_blk
+        st.info(f"✅ Validating **historical balances** at block **{blk}** (manually specified)")
+    else:
+        # Find block number by timestamp using binary search
+        with st.spinner("Finding block number for specified timestamp..."):
+            blk = find_block_by_timestamp(RPC_URL, utc_ts)
+        st.info(f"✅ Validating **historical balances** at block **{blk}** (timestamp: {utc_ts})")
 
 res = []
 with st.spinner("Fetching on-chain balances..."):
