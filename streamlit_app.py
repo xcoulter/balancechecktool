@@ -97,12 +97,36 @@ st.dataframe(df.head())
 
 cols = list(df.columns)
 suggest = lambda keys: next((c for c in cols if any(k in c.lower() for k in keys)), None)
-mapping = {
+
+# Auto-suggest columns
+suggested_mapping = {
     "address": suggest(["walletaddress","wallet","address"]),
     "chain": suggest(["blockchain","chain","network"]),
     "token_symbol": suggest(["symbol","ticker"]),
     "token_contract": suggest(["tokenaddress","contract"]),
     "reported_balance": suggest(["value","balance","amount"])
+}
+
+# Let user confirm/adjust column mapping
+st.subheader("Column Mapping")
+col_map_cols = st.columns(5)
+with col_map_cols[0]:
+    addr_col = st.selectbox("Wallet Address", cols, index=cols.index(suggested_mapping["address"]) if suggested_mapping["address"] in cols else 0)
+with col_map_cols[1]:
+    token_col = st.selectbox("Token Contract (optional)", [None] + cols, index=cols.index(suggested_mapping["token_contract"])+1 if suggested_mapping["token_contract"] in cols else 0)
+with col_map_cols[2]:
+    symbol_col = st.selectbox("Token Symbol (optional)", [None] + cols, index=cols.index(suggested_mapping["token_symbol"])+1 if suggested_mapping["token_symbol"] in cols else 0)
+with col_map_cols[3]:
+    balance_col = st.selectbox("Reported Balance", cols, index=cols.index(suggested_mapping["reported_balance"]) if suggested_mapping["reported_balance"] in cols else 0)
+with col_map_cols[4]:
+    chain_col = st.selectbox("Chain (optional)", [None] + cols, index=cols.index(suggested_mapping["chain"])+1 if suggested_mapping["chain"] in cols else 0)
+
+mapping = {
+    "address": addr_col,
+    "chain": chain_col,
+    "token_symbol": symbol_col,
+    "token_contract": token_col,
+    "reported_balance": balance_col
 }
 
 cmap = ColumnMap(**mapping)
