@@ -58,6 +58,7 @@ def make_w3(rpc): return Web3(Web3.HTTPProvider(rpc))
 
 def fetch_native(rpc, addr, blk): return make_w3(rpc).eth.get_balance(Web3.to_checksum_address(addr), blk)
 
+@st.cache_data(ttl=3600)
 def find_block_by_timestamp(rpc, target_ts):
     """Binary search to find block closest to target timestamp"""
     w3 = make_w3(rpc)
@@ -66,19 +67,36 @@ def find_block_by_timestamp(rpc, target_ts):
     
     # Check if target is in the future
     if target_ts >= latest_ts:
+        st.warning(f"⚠️ Target timestamp is in the future. Using latest block {latest_block}.")
         return latest_block
+    
+    # Check if target is too far in the past
+    genesis_block = w3.eth.get_block(0)
+    if target_ts < genesis_block.timestamp:
+        st.error(f"❌ Target timestamp is before genesis block. Using block 0.")
+        return 0
     
     # Binary search
     low, high = 0, latest_block
     closest_block = latest_block
+    closest_diff = abs(latest_ts - target_ts)
     
-    while low <= high:
+    iterations = 0
+    max_iterations = 100  # Safety limit
+    
+    while low <= high and iterations < max_iterations:
         mid = (low + high) // 2
         block = w3.eth.get_block(mid)
         block_ts = block.timestamp
+        diff = abs(block_ts - target_ts)
         
-        if abs(block_ts - target_ts) < abs(w3.eth.get_block(closest_block).timestamp - target_ts):
+        if diff < closest_diff:
             closest_block = mid
+            closest_diff = diff
+        
+        # If we're within 15 seconds, that's close enough
+        if diff < 15:
+            return mid
         
         if block_ts < target_ts:
             low = mid + 1
@@ -86,6 +104,15 @@ def find_block_by_timestamp(rpc, target_ts):
             high = mid - 1
         else:
             return mid
+        
+        iterations += 1
+    
+    # Verify the result
+    result_block = w3.eth.get_block(closest_block)
+    result_ts = result_block.timestamp
+    time_diff = abs(result_ts - target_ts)
+    
+    st.success(f"✅ Found block {closest_block} (timestamp difference: {time_diff} seconds)")
     
     return closest_block
 
@@ -144,30 +171,81 @@ df = pd.read_csv(upload) if upload.name.endswith('.csv') else pd.read_excel(uplo
 st.dataframe(df.head())
 
 cols = list(df.columns)
-suggest = lambda keys: next((c for c in cols if any(k in c.lower() for k in keys)), None)
 
-# Auto-suggest columns
+# Better column matching - exact match first, then partial
+def find_column(keywords):
+    # First try exact match (case insensitive)
+    for col in cols:
+        col_lower = col.lower().replace(' ', '').replace('_', '')
+        for keyword in keywords:
+            keyword_lower = keyword.lower().replace(' ', '').replace('_', '')
+            if col_lower == keyword_lower:
+                return col
+    # Then try partial match
+    for col in cols:
+        col_lower = col.lower()
+        for keyword in keywords:
+            if keyword.lower() in col_lower:
+                return col
+    return None
+
+# Auto-suggest columns with better matching
 suggested_mapping = {
-    "address": suggest(["walletaddress","wallet","address"]),
-    "chain": suggest(["blockchain","chain","network"]),
-    "token_symbol": suggest(["symbol","ticker"]),
-    "token_contract": suggest(["tokenaddress","contract"]),
-    "reported_balance": suggest(["value","balance","amount"])
+    "address": find_column(["walletaddress", "wallet address", "wallet", "address"]),
+    "chain": find_column(["blockchain", "chain", "network"]),
+    "token_symbol": find_column(["symbol", "ticker", "token"]),
+    "token_contract": find_column(["tokenaddress", "token address", "contractaddress", "contract address", "contract"]),
+    "reported_balance": find_column(["value", "balance", "amount"])
 }
 
+# Show detected columns
+st.write("**Auto-detected columns:**")
+detection_cols = st.columns(5)
+with detection_cols[0]: st.caption(f"Wallet: `{suggested_mapping['address'] or 'Not found'}`")
+with detection_cols[1]: st.caption(f"Token Contract: `{suggested_mapping['token_contract'] or 'Not found'}`")
+with detection_cols[2]: st.caption(f"Symbol: `{suggested_mapping['token_symbol'] or 'Not found'}`")
+with detection_cols[3]: st.caption(f"Balance: `{suggested_mapping['reported_balance'] or 'Not found'}`")
+with detection_cols[4]: st.caption(f"Chain: `{suggested_mapping['chain'] or 'Not found'}`")
+
 # Let user confirm/adjust column mapping
-st.subheader("Column Mapping")
+st.subheader("📋 Confirm Column Mapping")
+st.write("Verify the column mappings below. Adjust if needed.")
 col_map_cols = st.columns(5)
 with col_map_cols[0]:
-    addr_col = st.selectbox("Wallet Address", cols, index=cols.index(suggested_mapping["address"]) if suggested_mapping["address"] in cols else 0)
+    addr_col = st.selectbox(
+        "Wallet Address *", 
+        cols, 
+        index=cols.index(suggested_mapping["address"]) if suggested_mapping["address"] in cols else 0,
+        help="Column containing wallet addresses (required)"
+    )
 with col_map_cols[1]:
-    token_col = st.selectbox("Token Contract (optional)", [None] + cols, index=cols.index(suggested_mapping["token_contract"])+1 if suggested_mapping["token_contract"] in cols else 0)
+    token_col = st.selectbox(
+        "Token Contract", 
+        [None] + cols, 
+        index=cols.index(suggested_mapping["token_contract"])+1 if suggested_mapping["token_contract"] in cols else 0,
+        help="Column containing token contract addresses. Leave as 'None' if only validating native AVAX."
+    )
 with col_map_cols[2]:
-    symbol_col = st.selectbox("Token Symbol (optional)", [None] + cols, index=cols.index(suggested_mapping["token_symbol"])+1 if suggested_mapping["token_symbol"] in cols else 0)
+    symbol_col = st.selectbox(
+        "Token Symbol", 
+        [None] + cols, 
+        index=cols.index(suggested_mapping["token_symbol"])+1 if suggested_mapping["token_symbol"] in cols else 0,
+        help="Column containing token symbols (e.g., USDC, USDT)"
+    )
 with col_map_cols[3]:
-    balance_col = st.selectbox("Reported Balance", cols, index=cols.index(suggested_mapping["reported_balance"]) if suggested_mapping["reported_balance"] in cols else 0)
+    balance_col = st.selectbox(
+        "Reported Balance *", 
+        cols, 
+        index=cols.index(suggested_mapping["reported_balance"]) if suggested_mapping["reported_balance"] in cols else 0,
+        help="Column containing the balance values to validate (required)"
+    )
 with col_map_cols[4]:
-    chain_col = st.selectbox("Chain (optional)", [None] + cols, index=cols.index(suggested_mapping["chain"])+1 if suggested_mapping["chain"] in cols else 0)
+    chain_col = st.selectbox(
+        "Chain", 
+        [None] + cols, 
+        index=cols.index(suggested_mapping["chain"])+1 if suggested_mapping["chain"] in cols else 0,
+        help="Column containing blockchain/network info"
+    )
 
 mapping = {
     "address": addr_col,
