@@ -54,7 +54,12 @@ def human_to_decimal(val):
     except: return None
 
 @st.cache_resource
-def make_w3(rpc): return Web3(Web3.HTTPProvider(rpc))
+def make_w3(rpc):
+    from web3.middleware import ExtraDataToPOAMiddleware
+    w3 = Web3(Web3.HTTPProvider(rpc))
+    # Inject POA middleware to handle Avalanche's extra data in blocks
+    w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+    return w3
 
 def fetch_native(rpc, addr, blk): return make_w3(rpc).eth.get_balance(Web3.to_checksum_address(addr), blk)
 
