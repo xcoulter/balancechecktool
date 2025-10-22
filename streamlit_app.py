@@ -116,15 +116,19 @@ with st.spinner("Fetching on-chain balances..."):
         token_raw = str(r[cmap.token_contract]).strip() if cmap.token_contract else None
         rep = human_to_decimal(r[cmap.reported_balance])
         
-        # Validate wallet address
-        if not addr.startswith("0x") or len(addr) != 42:
-            res.append({"row": i+1, "wallet": addr,"token": token_raw or "AVAX","reported": rep,"onchain": None,"delta": None,"error": "Invalid wallet address format"})
+        # Validate wallet address (basic check)
+        if not addr or len(addr) < 10:
+            res.append({"row": i+1, "wallet": addr,"token": token_raw or "AVAX","reported": rep,"onchain": None,"delta": None,"error": "Invalid or empty wallet address"})
             continue
             
         try:
             if _is_native(token_raw):
-                bal = fetch_native(RPC_URL, addr, blk) / 1e18
-                sym = "AVAX"
+                try:
+                    bal = fetch_native(RPC_URL, addr, blk) / 1e18
+                    sym = "AVAX"
+                except Exception as e:
+                    res.append({"row": i+1, "wallet": addr,"token": "AVAX","reported": rep,"onchain": None,"delta": None,"error": f"Invalid address format: {str(e)}"})
+                    continue
             else:
                 raw = fetch_erc20(RPC_URL, token_raw, addr, blk)
                 if raw is None:
@@ -135,7 +139,7 @@ with st.spinner("Fetching on-chain balances..."):
                 sym = r.get(cmap.token_symbol,"TOKEN") if cmap.token_symbol else "TOKEN"
             res.append({"row": i+1, "wallet": addr,"token": sym,"reported": rep,"onchain": bal,"delta": (bal-rep if rep is not None else None)})
         except Exception as e:
-            res.append({"row": i+1, "wallet": addr,"token": token_raw if token_raw else "AVAX","reported": rep,"onchain": None,"delta": None,"error": str(e)})
+            res.append({"row": i+1, "wallet": addr,"token": token_raw if token_raw else "AVAX","reported": rep,"onchain": None,"delta": None,"error": f"Error: {str(e)}"})
     progress_bar.empty()
 
 out = pd.DataFrame(res)
