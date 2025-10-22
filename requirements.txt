@@ -1,0 +1,6 @@
+streamlit
+pandas
+web3
+pytz
+requests
+openpyxl
